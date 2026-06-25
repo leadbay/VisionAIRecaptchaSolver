@@ -6,13 +6,35 @@ import logging
 import time
 from typing import Any
 
-try:
-    from DrissionPage.errors import ElementLostError
-except Exception:  # pragma: no cover
-    ElementLostError = RuntimeError
-
 from vision_ai_recaptcha_solver import constants as _constants
 from vision_ai_recaptcha_solver.exceptions import ElementNotFoundError
+
+try:
+    from DrissionPage.errors import (
+        ContextLostError,
+        ElementLostError,
+        NoRectError,
+        WaitTimeoutError,
+    )
+    from DrissionPage.errors import (
+        ElementNotFoundError as DrissionElementNotFoundError,
+    )
+except Exception:  # pragma: no cover
+    ContextLostError = RuntimeError
+    DrissionElementNotFoundError = RuntimeError
+    ElementLostError = RuntimeError
+    NoRectError = RuntimeError
+    WaitTimeoutError = RuntimeError
+
+_TRANSIENT_BROWSER_ERRORS = (
+    RuntimeError,
+    TimeoutError,
+    ContextLostError,
+    DrissionElementNotFoundError,
+    ElementLostError,
+    NoRectError,
+    WaitTimeoutError,
+)
 
 # Selectors
 CHECKBOX_SELECTOR = _constants.CHECKBOX_SELECTOR
@@ -61,10 +83,7 @@ def get_checkbox_iframe(
         except AttributeError as e:
             logger.debug(f"get_checkbox_iframe: AttributeError - {e}")
             time.sleep(0.3)
-        except ElementLostError as e:
-            logger.debug(f"get_checkbox_iframe: ElementLostError - {e}")
-            time.sleep(0.3)
-        except (RuntimeError, TimeoutError) as e:
+        except _TRANSIENT_BROWSER_ERRORS as e:
             logger.debug(f"get_checkbox_iframe: Exception - {e}")
             time.sleep(0.3)
 
@@ -113,10 +132,7 @@ def get_challenge_iframe(
         except AttributeError as e:
             logger.debug(f"get_challenge_iframe: AttributeError - {e}")
             time.sleep(0.5)
-        except ElementLostError as e:
-            logger.debug(f"get_challenge_iframe: ElementLostError - {e}")
-            time.sleep(0.5)
-        except (RuntimeError, TimeoutError) as e:
+        except _TRANSIENT_BROWSER_ERRORS as e:
             logger.debug(f"get_challenge_iframe: Exception during search - {e}")
             time.sleep(0.5)
 
@@ -139,16 +155,20 @@ def click_checkbox(
     logger = logging.getLogger("vision_ai_recaptcha_solver")
 
     iframe = get_checkbox_iframe(browser, timeout)
-    if iframe:
+    if not iframe:
+        logger.debug("click_checkbox: Checkbox iframe not found")
+        raise ElementNotFoundError("Checkbox iframe not found")
+
+    try:
         checkbox = iframe.ele(CHECKBOX_SELECTOR, timeout=timeout)
         if checkbox:
             checkbox.click()
-        else:
-            logger.debug("click_checkbox: Checkbox element not found")
-            raise ElementNotFoundError("Checkbox element not found")
-    else:
-        logger.debug("click_checkbox: Checkbox iframe not found")
-        raise ElementNotFoundError("Checkbox iframe not found")
+            return
+    except (AttributeError, *_TRANSIENT_BROWSER_ERRORS) as e:
+        logger.debug(f"click_checkbox: Exception - {e}")
+
+    logger.debug("click_checkbox: Checkbox element not found")
+    raise ElementNotFoundError("Checkbox element not found")
 
 
 def click_verify_button(
@@ -182,7 +202,7 @@ def click_verify_button(
     except AttributeError as e:
         logger.debug(f"click_verify_button: AttributeError - {e}")
         return False
-    except (RuntimeError, TimeoutError, ElementLostError) as e:
+    except _TRANSIENT_BROWSER_ERRORS as e:
         logger.debug(f"click_verify_button: Exception - {e}")
         return False
 
@@ -198,10 +218,38 @@ def click_reload_button(
         timeout: Maximum time to wait for the button.
     """
     iframe = get_challenge_iframe(browser, timeout)
-    if iframe:
+    if not iframe:
+        return
+
+    try:
         button = iframe.ele(RELOAD_BUTTON_SELECTOR, timeout=timeout)
         if button:
             button.click()
+    except (AttributeError, *_TRANSIENT_BROWSER_ERRORS):
+        return
+
+
+def wait_for_challenge_tiles(
+    browser: Any,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> bool:
+    """Wait for image challenge tiles to be available.
+
+    Missing tiles are common while Google is rotating/reloading a challenge, so
+    callers should treat False as retryable rather than fatal.
+    """
+    logger = logging.getLogger("vision_ai_recaptcha_solver")
+
+    iframe = get_challenge_iframe(browser, timeout)
+    if not iframe:
+        logger.debug("wait_for_challenge_tiles: No challenge iframe found")
+        return False
+
+    try:
+        return bool(iframe.ele("#rc-imageselect-target td", timeout=timeout))
+    except (AttributeError, *_TRANSIENT_BROWSER_ERRORS) as e:
+        logger.debug(f"wait_for_challenge_tiles: Exception - {e}")
+        return False
 
 
 def is_solved(
@@ -226,7 +274,7 @@ def is_solved(
         solved = iframe.ele(SOLVED_CHECKBOX_SELECTOR, timeout=timeout)
         return solved is not None and bool(solved)
 
-    except (AttributeError, RuntimeError, TimeoutError, ElementLostError):
+    except (AttributeError, *_TRANSIENT_BROWSER_ERRORS):
         return False
 
 
@@ -255,7 +303,7 @@ def is_verify_button_disabled(
         disabled = button.attr("disabled")
         return disabled is not None
 
-    except (AttributeError, RuntimeError, TimeoutError, ElementLostError):
+    except (AttributeError, *_TRANSIENT_BROWSER_ERRORS):
         return True
 
 
@@ -331,7 +379,7 @@ def get_target_keyword(
     except AttributeError as e:
         logger.debug(f"get_target_keyword: AttributeError - {e}")
         return None
-    except (RuntimeError, TimeoutError, ElementLostError) as e:
+    except _TRANSIENT_BROWSER_ERRORS as e:
         logger.debug(f"get_target_keyword: Exception - {e}")
         return None
 
@@ -369,7 +417,7 @@ def get_challenge_title(
     except AttributeError as e:
         logger.debug(f"get_challenge_title: AttributeError - {e}")
         return ""
-    except (RuntimeError, TimeoutError, ElementLostError) as e:
+    except _TRANSIENT_BROWSER_ERRORS as e:
         logger.debug(f"get_challenge_title: Exception - {e}")
         return ""
 
@@ -420,7 +468,7 @@ def get_captcha_image_urls(
             except AttributeError as e:
                 logger.debug(f"get_captcha_image_urls: Selector '{selector}' AttributeError - {e}")
                 continue
-            except (RuntimeError, TimeoutError) as e:
+            except _TRANSIENT_BROWSER_ERRORS as e:
                 logger.debug(f"get_captcha_image_urls: Selector '{selector}' failed - {e}")
                 continue
 
@@ -430,7 +478,7 @@ def get_captcha_image_urls(
     except AttributeError as e:
         logger.debug(f"get_captcha_image_urls: AttributeError - {e}")
         return []
-    except (RuntimeError, TimeoutError, ElementLostError) as e:
+    except _TRANSIENT_BROWSER_ERRORS as e:
         logger.debug(f"get_captcha_image_urls: Exception - {e}")
         return []
 
@@ -476,7 +524,7 @@ def click_tile(
             except AttributeError as e:
                 logger.debug(f"click_tile: Selector '{selector}' AttributeError - {e}")
                 continue
-            except (RuntimeError, TimeoutError) as e:
+            except _TRANSIENT_BROWSER_ERRORS as e:
                 logger.debug(f"click_tile: Selector '{selector}' failed - {e}")
                 continue
 
@@ -486,7 +534,7 @@ def click_tile(
     except AttributeError as e:
         logger.debug(f"click_tile: AttributeError - {e}")
         return False
-    except (RuntimeError, TimeoutError, ElementLostError) as e:
+    except _TRANSIENT_BROWSER_ERRORS as e:
         logger.debug(f"click_tile: Exception - {e}")
         return False
 

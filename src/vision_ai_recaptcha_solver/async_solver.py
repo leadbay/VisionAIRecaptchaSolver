@@ -14,10 +14,10 @@ from vision_ai_recaptcha_solver.browser.navigation import (
     click_checkbox,
     click_reload_button,
     click_verify_button,
-    get_challenge_iframe,
     get_challenge_title,
     get_target_keyword,
     is_solved,
+    wait_for_challenge_tiles,
     wait_for_verify_result,
 )
 from vision_ai_recaptcha_solver.captcha.dynamic_handler import DynamicCaptchaHandler
@@ -372,19 +372,11 @@ class AsyncRecaptchaSolver:
                             self.config.human_delay_sigma,
                         )
                         # Get new challenge
-                        challenge_frame = await self._run_in_executor(
-                            get_challenge_iframe,
+                        await self._run_in_executor(
+                            wait_for_challenge_tiles,
                             browser,
                             self.config.default_timeout,
                         )
-                        if challenge_frame:
-                            await self._run_in_executor(
-                                lambda cf: cf.ele(
-                                    "#rc-imageselect-target td",
-                                    timeout=self.config.default_timeout,
-                                ),
-                                challenge_frame,
-                            )
                         continue
 
                     # Get handler and solve
@@ -401,19 +393,11 @@ class AsyncRecaptchaSolver:
                             self.config.human_delay_mean,
                             self.config.human_delay_sigma,
                         )
-                        challenge_frame = await self._run_in_executor(
-                            get_challenge_iframe,
+                        await self._run_in_executor(
+                            wait_for_challenge_tiles,
                             browser,
                             self.config.default_timeout,
                         )
-                        if challenge_frame:
-                            await self._run_in_executor(
-                                lambda cf: cf.ele(
-                                    "#rc-imageselect-target td",
-                                    timeout=self.config.default_timeout,
-                                ),
-                                challenge_frame,
-                            )
                         continue
 
                     # Click verify
@@ -438,19 +422,11 @@ class AsyncRecaptchaSolver:
                         self.config.human_delay_mean,
                         self.config.human_delay_sigma,
                     )
-                    challenge_frame = await self._run_in_executor(
-                        get_challenge_iframe,
+                    await self._run_in_executor(
+                        wait_for_challenge_tiles,
                         browser,
                         self.config.default_timeout,
                     )
-                    if challenge_frame:
-                        await self._run_in_executor(
-                            lambda cf: cf.ele(
-                                "#rc-imageselect-target td",
-                                timeout=self.config.default_timeout,
-                            ),
-                            challenge_frame,
-                        )
 
                 except (ElementNotFoundError, UnsupportedCaptchaError) as e:
                     self.logger.warning(f"Attempt {attempts} failed: {e}")
