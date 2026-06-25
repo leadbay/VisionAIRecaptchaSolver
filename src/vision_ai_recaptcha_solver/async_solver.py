@@ -352,6 +352,7 @@ class AsyncRecaptchaSolver:
 
             # Solve loop
             solved_successfully = False
+            attempt_trace: list[dict[str, object]] = []
             while attempts < self.config.max_attempts:
                 attempts += 1
                 self.logger.debug(f"Solve attempt {attempts}/{self.config.max_attempts}")
@@ -362,7 +363,18 @@ class AsyncRecaptchaSolver:
                         self._determine_captcha_type, browser
                     )
                     last_captcha_type = captcha_type
-                    target_class = await self._run_in_executor(self._get_target_class, browser)
+                    keyword, target_class, coco_target_class = await self._run_in_executor(
+                        self._get_target_info, browser, captcha_type
+                    )
+                    attempt_info: dict[str, object] = {
+                        "attempt": attempts,
+                        "captcha_type": captcha_type.value,
+                        "keyword": keyword,
+                        "target_class": target_class,
+                        "coco_target_class": coco_target_class,
+                    }
+                    attempt_trace.append(attempt_info)
+                    self.logger.info("Attempt %s target info: %s", attempts, attempt_info)
 
                     if target_class is None:
                         self.logger.info("Unknown target, reloading captcha")
@@ -373,6 +385,24 @@ class AsyncRecaptchaSolver:
                             self.config.human_delay_sigma,
                         )
                         # Get new challenge
+                        await self._run_in_executor(
+                            wait_for_challenge_tiles,
+                            browser,
+                            self.config.default_timeout,
+                        )
+                        continue
+
+                    if captcha_type == CaptchaType.SQUARE_4X4 and coco_target_class is None:
+                        self.logger.info(
+                            "Unsupported 4x4 target '%s' for COCO detection, reloading captcha",
+                            keyword,
+                        )
+                        await self._run_in_executor(click_reload_button, browser)
+                        await self._run_in_executor(
+                            human_delay,
+                            self.config.human_delay_mean,
+                            self.config.human_delay_sigma,
+                        )
                         await self._run_in_executor(
                             wait_for_challenge_tiles,
                             browser,
@@ -439,7 +469,7 @@ class AsyncRecaptchaSolver:
                 raise TokenExtractionError(
                     "Captcha not solved after "
                     f"{attempts}/{self.config.max_attempts} attempts "
-                    f"(last_captcha_type={captcha_type_value})"
+                    f"(last_captcha_type={captcha_type_value}, trace={attempt_trace})"
                 )
 
             # Extract token. Once the visible challenge is solved, token propagation
@@ -523,19 +553,30 @@ class AsyncRecaptchaSolver:
         else:
             return CaptchaType.SELECTION_3X3
 
-    def _get_target_class(self, browser: Any) -> int | None:
-        """Get the YOLO class index for the target object."""
+    def _get_target_info(
+        self, browser: Any, captcha_type: CaptchaType
+    ) -> tuple[str | None, int | None, int | None]:
+        """Get target keyword plus classifier/detector class mappings."""
         keyword = get_target_keyword(browser)
         if not keyword:
             self.logger.info("No target keyword found in challenge")
-            return None
+            return None, None, None
         if self._detector is None:
             self.logger.info("No detector available for target keyword '%s'", keyword)
-            return None
+            return keyword, None, None
 
         target_class = self._detector.get_target_class(keyword)
-        self.logger.info("Target keyword '%s' mapped to class %s", keyword, target_class)
-        return target_class
+        coco_target_class = None
+        if captcha_type == CaptchaType.SQUARE_4X4:
+            coco_target_class = self._detector.get_coco_target_class(keyword)
+        self.logger.info(
+            "Target keyword '%s' mapped to class=%s coco_class=%s captcha_type=%s",
+            keyword,
+            target_class,
+            coco_target_class,
+            captcha_type.value,
+        )
+        return keyword, target_class, coco_target_class
 
     def _get_handler(self, captcha_type: CaptchaType) -> BaseCaptchaHandler:
         """Get the appropriate handler for a captcha type."""
