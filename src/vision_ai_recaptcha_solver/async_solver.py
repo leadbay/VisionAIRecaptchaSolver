@@ -351,6 +351,7 @@ class AsyncRecaptchaSolver:
             await self._run_in_executor(self._detector.ensure_warmup_complete)
 
             # Solve loop
+            solved_successfully = False
             while attempts < self.config.max_attempts:
                 attempts += 1
                 self.logger.debug(f"Solve attempt {attempts}/{self.config.max_attempts}")
@@ -408,6 +409,7 @@ class AsyncRecaptchaSolver:
                     if await self._run_in_executor(
                         wait_for_verify_result, browser, self.config.default_timeout
                     ):
+                        solved_successfully = True
                         self.logger.info("Captcha solved successfully!")
                         break
 
@@ -432,13 +434,26 @@ class AsyncRecaptchaSolver:
                     self.logger.warning(f"Attempt {attempts} failed: {e}")
                     await self._run_in_executor(human_delay, 0.5, 0.1)
 
-            # Extract token
+            if not solved_successfully and not await self._run_in_executor(is_solved, browser, 1):
+                captcha_type_value = last_captcha_type.value if last_captcha_type else "unknown"
+                raise TokenExtractionError(
+                    "Captcha not solved after "
+                    f"{attempts}/{self.config.max_attempts} attempts "
+                    f"(last_captcha_type={captcha_type_value})"
+                )
+
+            # Extract token. Once the visible challenge is solved, token propagation
+            # should be quick; do not burn the full solver timeout here because that
+            # turns unsupported/failed challenges into Cloud Run 504s.
+            token_timeout = min(self.config.default_timeout, self.config.timeout)
             token = await self._run_in_executor(
-                lambda: token_handle.wait(timeout=self.config.timeout) if token_handle else None
+                lambda: token_handle.wait(timeout=token_timeout) if token_handle else None
             )
 
             if not token:
-                raise TokenExtractionError("Failed to extract reCAPTCHA token")
+                raise TokenExtractionError(
+                    f"Failed to extract reCAPTCHA token within {token_timeout}s after solve"
+                )
 
             result_cookies = await self._run_in_executor(self._get_cookies, browser)
             time_taken = round(time.time() - start_time, 2)
@@ -511,9 +526,16 @@ class AsyncRecaptchaSolver:
     def _get_target_class(self, browser: Any) -> int | None:
         """Get the YOLO class index for the target object."""
         keyword = get_target_keyword(browser)
-        if not keyword or self._detector is None:
+        if not keyword:
+            self.logger.info("No target keyword found in challenge")
             return None
-        return self._detector.get_target_class(keyword)
+        if self._detector is None:
+            self.logger.info("No detector available for target keyword '%s'", keyword)
+            return None
+
+        target_class = self._detector.get_target_class(keyword)
+        self.logger.info("Target keyword '%s' mapped to class %s", keyword, target_class)
+        return target_class
 
     def _get_handler(self, captcha_type: CaptchaType) -> BaseCaptchaHandler:
         """Get the appropriate handler for a captcha type."""
