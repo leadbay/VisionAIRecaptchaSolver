@@ -7,6 +7,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -87,6 +88,8 @@ class AsyncRecaptchaSolver:
         self._handlers: dict[CaptchaType, BaseCaptchaHandler] | None = None
         self._replicator: Any = None
         self._owns_download_dir: bool = False
+        self.last_attempt_trace: list[dict[str, object]] = []
+        self.debug_artifacts: list[str] = []
         self._init_download_dir()
 
     def _init_download_dir(self) -> None:
@@ -245,6 +248,9 @@ class AsyncRecaptchaSolver:
             RecaptchaSolverError: If solving fails or solver is closed.
             TokenExtractionError: If token cannot be extracted.
         """
+        self.last_attempt_trace = []
+        self.debug_artifacts = []
+
         # Validate inputs
         if not website_key or not website_key.strip():
             raise ValueError("website_key cannot be empty")
@@ -353,10 +359,12 @@ class AsyncRecaptchaSolver:
             # Solve loop
             solved_successfully = False
             attempt_trace: list[dict[str, object]] = []
+            self.last_attempt_trace = attempt_trace
             while attempts < self.config.max_attempts:
                 attempts += 1
                 self.logger.debug(f"Solve attempt {attempts}/{self.config.max_attempts}")
 
+                handler: BaseCaptchaHandler | None = None
                 try:
                     # Determine captcha type and get target
                     captcha_type = await self._run_in_executor(
@@ -375,6 +383,14 @@ class AsyncRecaptchaSolver:
                     }
                     attempt_trace.append(attempt_info)
                     self.logger.info("Attempt %s target info: %s", attempts, attempt_info)
+                    before_screenshot = await self._run_in_executor(
+                        self._capture_browser_screenshot_sync,
+                        browser,
+                        attempts,
+                        "before-click",
+                    )
+                    if before_screenshot:
+                        attempt_info["before_screenshot"] = before_screenshot
 
                     if target_class is None:
                         attempt_info["action"] = "reload_unknown_target"
@@ -418,6 +434,9 @@ class AsyncRecaptchaSolver:
                         handler.solve, browser, target_class
                     )
                     attempt_info["clicked_cells"] = clicked_cells
+                    if getattr(handler, "last_debug", None):
+                        attempt_info["detection_debug"] = handler.last_debug
+                        self._refresh_debug_artifacts()
 
                     if not clicked_cells:
                         attempt_info["action"] = "reload_no_cells_clicked"
@@ -434,6 +453,15 @@ class AsyncRecaptchaSolver:
                             self.config.default_timeout,
                         )
                         continue
+
+                    after_screenshot = await self._run_in_executor(
+                        self._capture_browser_screenshot_sync,
+                        browser,
+                        attempts,
+                        "after-click",
+                    )
+                    if after_screenshot:
+                        attempt_info["after_screenshot"] = after_screenshot
 
                     # Click verify
                     await self._run_in_executor(human_delay, 0.3, 0.2)
@@ -458,6 +486,9 @@ class AsyncRecaptchaSolver:
                     if attempt_trace:
                         attempt_trace[-1]["action"] = "reload_low_confidence"
                         attempt_trace[-1]["error"] = str(e)
+                        if handler is not None and getattr(handler, "last_debug", None):
+                            attempt_trace[-1]["detection_debug"] = handler.last_debug
+                            self._refresh_debug_artifacts()
                     self.logger.info(f"Low confidence detection, reloading: {e}")
                     await self._run_in_executor(click_reload_button, browser)
                     await self._run_in_executor(
@@ -475,6 +506,9 @@ class AsyncRecaptchaSolver:
                     if attempt_trace:
                         attempt_trace[-1]["action"] = "attempt_exception"
                         attempt_trace[-1]["error"] = str(e)
+                        if handler is not None and getattr(handler, "last_debug", None):
+                            attempt_trace[-1]["detection_debug"] = handler.last_debug
+                            self._refresh_debug_artifacts()
                     self.logger.warning(f"Attempt {attempts} failed: {e}")
                     await self._run_in_executor(human_delay, 0.5, 0.1)
 
@@ -601,6 +635,69 @@ class AsyncRecaptchaSolver:
         if not handler:
             raise UnsupportedCaptchaError(f"Unsupported captcha type: {captcha_type}")
         return handler
+
+    def _debug_dir(self) -> Path | None:
+        if not self.config.debug_artifacts_enabled or self.config.debug_artifacts_dir is None:
+            return None
+        debug_dir = Path(self.config.debug_artifacts_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        return debug_dir
+
+    def _refresh_debug_artifacts(self) -> None:
+        debug_dir = self._debug_dir()
+        if debug_dir is None:
+            return
+        self.debug_artifacts = sorted(
+            path.name for path in debug_dir.iterdir() if path.is_file()
+        )
+
+    def _capture_browser_screenshot_sync(
+        self,
+        browser: Any,
+        attempt: int,
+        label: str,
+    ) -> str | None:
+        debug_dir = self._debug_dir()
+        if debug_dir is None:
+            return None
+
+        filename = f"{int(time.time() * 1000)}-attempt-{attempt}-{label}-page.png"
+        path = debug_dir / filename
+
+        candidates = []
+        if hasattr(browser, "latest_tab"):
+            candidates.append(browser.latest_tab)
+        candidates.append(browser)
+
+        for target in candidates:
+            calls = []
+            if hasattr(target, "get_screenshot"):
+                calls.extend(
+                    (
+                        ("get_screenshot", (), {"path": str(path), "full_page": True}),
+                        ("get_screenshot", (), {"path": str(path)}),
+                        ("get_screenshot", (str(path),), {}),
+                    )
+                )
+            if hasattr(target, "screenshot"):
+                calls.extend(
+                    (
+                        ("screenshot", (), {"path": str(path)}),
+                        ("screenshot", (str(path),), {}),
+                    )
+                )
+
+            for method_name, args, kwargs in calls:
+                try:
+                    getattr(target, method_name)(*args, **kwargs)
+                    if path.exists() and path.stat().st_size > 0:
+                        self._refresh_debug_artifacts()
+                        return filename
+                except Exception:
+                    continue
+
+        self.logger.debug("Could not capture browser screenshot for attempt %s label %s", attempt, label)
+        return None
 
     def _get_cookies(self, browser: Any) -> list[dict[str, Any]]:
         """Get cookies from the browser."""

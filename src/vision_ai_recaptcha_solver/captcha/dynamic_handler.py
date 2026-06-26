@@ -49,7 +49,9 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
         Raises:
             LowConfidenceError: If any top 3 cell has confidence below minimum threshold.
         """
+        self.reset_debug()
         all_clicked: list[int] = []
+        debug_rounds: list[dict[str, Any]] = []
 
         non_matching_cache: set[int] = set()
 
@@ -72,6 +74,21 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
         # Rank by confidence
         ranked = sorted(cell_confidences, key=lambda x: x[1], reverse=True)
 
+        self.last_debug = {
+            "image_urls_count": len(img_urls),
+            "unique_image_urls_count": len(unique_urls),
+            "cell_confidences": [
+                {"cell": cell, "confidence": round(conf, 4)} for cell, conf in cell_confidences
+            ],
+            "ranked_cells": [
+                {"cell": cell, "confidence": round(conf, 4)} for cell, conf in ranked
+            ],
+            "rounds": debug_rounds,
+        }
+        source_file = self.save_debug_image(main_image, "dynamic_3x3-source")
+        if source_file:
+            self.last_debug["source_image"] = source_file
+
         # Check minimum confidence threshold for top 3 cells
         min_threshold = self.config.min_confidence_threshold
         for i, (cell, conf) in enumerate(ranked[:3]):
@@ -93,6 +110,17 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
             if fourth_conf >= self.config.fourth_cell_threshold:
                 answers.append(fourth_cell)
                 self.logger.debug(f"Including 4th cell {fourth_cell} with conf {fourth_conf:.2f}")
+
+        annotated_file = self.save_grid_confidence_image(
+            main_image,
+            3,
+            cell_confidences,
+            answers,
+            "dynamic_3x3-confidence-initial",
+        )
+        if annotated_file:
+            self.last_debug["annotated_image"] = annotated_file
+        self.last_debug["selected_initial_cells"] = answers.copy()
 
         # Cells not in answers are non-matching for subsequent rounds
         for cell, _ in ranked:
@@ -131,9 +159,27 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
 
             tiles_to_analyze = set(answers)
 
-            answers = self._detect_with_cache(
+            answers, round_confidences = self._detect_with_cache(
                 main_image, target_class, non_matching_cache, tiles_to_analyze
             )
+            round_info: dict[str, Any] = {
+                "analyzed_cells": sorted(tiles_to_analyze),
+                "cell_confidences": [
+                    {"cell": cell, "confidence": round(conf, 4)}
+                    for cell, conf in round_confidences
+                ],
+                "selected_cells": answers.copy(),
+            }
+            round_image = self.save_grid_confidence_image(
+                main_image,
+                3,
+                round_confidences,
+                answers,
+                f"dynamic_3x3-confidence-round-{len(debug_rounds) + 2}",
+            )
+            if round_image:
+                round_info["annotated_image"] = round_image
+            debug_rounds.append(round_info)
 
             if not answers:
                 self.logger.debug("No more targets detected")
@@ -157,7 +203,7 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
         target_class: int,
         non_matching_cache: set[int],
         tiles_to_analyze: set[int],
-    ) -> list[int]:
+    ) -> tuple[list[int], list[tuple[int, float]]]:
         """Detect targets only in specified tiles, using cache to skip known non-matches.
 
         Uses batch prediction for parallel processing of all tiles at once.
@@ -169,7 +215,7 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
             tiles_to_analyze: Set of cell numbers (1-indexed) to analyze.
 
         Returns:
-            List of cell numbers containing the target.
+            Tuple of selected cell numbers and analyzed cell confidences.
         """
         img_height, img_width = image.shape[:2]
         grid_size = 3
@@ -205,14 +251,16 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
                 cell_nums_to_predict.append(cell_num)
 
         if not tiles:
-            return []
+            return [], []
 
         # Batch prediction
         confidences = self.detector.get_target_confidences_batch(tiles, target_class)
 
         # Process results
         answers = []
+        round_confidences: list[tuple[int, float]] = []
         for cell_num, target_conf in zip(cell_nums_to_predict, confidences, strict=True):
+            round_confidences.append((cell_num, target_conf))
             if target_conf >= conf_threshold:
                 self.logger.debug(f"Tile {cell_num}: target conf {target_conf:.2f} SUCCESS TARGET")
                 answers.append(cell_num)
@@ -220,7 +268,7 @@ class DynamicCaptchaHandler(BaseCaptchaHandler):
                 self.logger.debug(f"Tile {cell_num}: target conf {target_conf:.2f}")
                 non_matching_cache.add(cell_num)
 
-        return answers
+        return answers, round_confidences
 
     def _check_for_new_images(
         self,

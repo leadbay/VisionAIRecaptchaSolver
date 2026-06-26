@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import cv2
 import numpy as np
 
 from vision_ai_recaptcha_solver.browser.navigation import (
@@ -46,6 +48,7 @@ class BaseCaptchaHandler(ABC):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
         self._work_dir = config.download_dir
+        self.last_debug: dict[str, Any] = {}
 
     @abstractmethod
     def solve(self, browser: Any, target_class: int) -> list[int]:
@@ -59,6 +62,65 @@ class BaseCaptchaHandler(ABC):
             List of cell indices that were clicked.
         """
         pass
+
+    def reset_debug(self) -> None:
+        self.last_debug = {}
+
+    def _debug_dir(self) -> Path | None:
+        if not self.config.debug_artifacts_enabled or self.config.debug_artifacts_dir is None:
+            return None
+        debug_dir = Path(self.config.debug_artifacts_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        return debug_dir
+
+    def save_debug_image(self, image: NDArray[np.uint8], label: str) -> str | None:
+        debug_dir = self._debug_dir()
+        if debug_dir is None:
+            return None
+        safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label)[:80]
+        filename = f"{int(time.time() * 1000)}-{safe_label}.png"
+        path = debug_dir / filename
+        try:
+            cv2.imwrite(str(path), image)
+            return filename
+        except Exception as e:
+            self.logger.debug("Failed to save debug image %s: %s", path, e)
+            return None
+
+    def save_grid_confidence_image(
+        self,
+        image: NDArray[np.uint8],
+        grid_size: int,
+        confidences: list[tuple[int, float]],
+        selected_cells: list[int],
+        label: str,
+    ) -> str | None:
+        annotated = image.copy()
+        img_height, img_width = annotated.shape[:2]
+        tile_h = img_height // grid_size
+        tile_w = img_width // grid_size
+        conf_by_cell = dict(confidences)
+        selected = set(selected_cells)
+
+        for row in range(grid_size):
+            for col in range(grid_size):
+                cell = row * grid_size + col + 1
+                x1, y1 = col * tile_w, row * tile_h
+                x2, y2 = x1 + tile_w, y1 + tile_h
+                color = (0, 200, 0) if cell in selected else (80, 80, 255)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                text = f"{cell}:{conf_by_cell.get(cell, 0.0):.2f}"
+                cv2.putText(
+                    annotated,
+                    text,
+                    (x1 + 5, y1 + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+        return self.save_debug_image(annotated, label)
 
     def click_cells(self, browser: Any, cells: list[int]) -> None:
         """Click on the specified grid cells.

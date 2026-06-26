@@ -40,6 +40,7 @@ class SelectionCaptchaHandler(BaseCaptchaHandler):
         Raises:
             LowConfidenceError: If any top 3 cell has confidence below minimum threshold.
         """
+        self.reset_debug()
         img_urls = self.get_image_urls(browser)
         if not img_urls:
             self.logger.warning("No captcha images found")
@@ -58,6 +59,20 @@ class SelectionCaptchaHandler(BaseCaptchaHandler):
 
         # Rank by confidence
         ranked = sorted(cell_confidences, key=lambda x: x[1], reverse=True)
+
+        self.last_debug = {
+            "image_urls_count": len(img_urls),
+            "unique_image_urls_count": len(unique_urls),
+            "cell_confidences": [
+                {"cell": cell, "confidence": round(conf, 4)} for cell, conf in cell_confidences
+            ],
+            "ranked_cells": [
+                {"cell": cell, "confidence": round(conf, 4)} for cell, conf in ranked
+            ],
+        }
+        source_file = self.save_debug_image(main_image, "selection_3x3-source")
+        if source_file:
+            self.last_debug["source_image"] = source_file
 
         # Check minimum confidence threshold for top 3 cells
         min_threshold = self.config.min_confidence_threshold
@@ -80,6 +95,17 @@ class SelectionCaptchaHandler(BaseCaptchaHandler):
             if fourth_conf >= self.config.fourth_cell_threshold:
                 answers.append(fourth_cell)
                 self.logger.debug(f"Including 4th cell {fourth_cell} with conf {fourth_conf:.2f}")
+
+        annotated_file = self.save_grid_confidence_image(
+            main_image,
+            3,
+            cell_confidences,
+            answers,
+            "selection_3x3-confidence",
+        )
+        if annotated_file:
+            self.last_debug["annotated_image"] = annotated_file
+        self.last_debug["selected_cells"] = answers
 
         self.click_cells(browser, answers)
         self.human_delay(0.3, 0.2)

@@ -63,6 +63,8 @@ class SolverConfig:
             signal handlers. Default is True.
         cleanup_tmp_on_close: Whether to delete the temporary download directory when
             close() is called. Default is True.
+        debug_artifacts_enabled: Whether to save bounded captcha debug artifacts.
+        debug_artifacts_dir: Directory where debug artifacts should be written.
     """
 
     model_path: Path | str | None = None
@@ -97,6 +99,10 @@ class SolverConfig:
 
     # Cleanup
     cleanup_tmp_on_close: bool = True
+
+    # Debug artifacts
+    debug_artifacts_enabled: bool = False
+    debug_artifacts_dir: Path | str | None = None
 
     _server_port_explicit: bool = field(init=False, repr=False, default=False)
     _download_dir_explicit: bool = field(init=False, repr=False, default=False)
@@ -156,6 +162,9 @@ class SolverConfig:
             raise ValueError(
                 f"image_download_retry_delay must be non-negative, got {self.image_download_retry_delay}"
             )
+
+        if self.debug_artifacts_dir is not None and not isinstance(self.debug_artifacts_dir, Path):
+            object.__setattr__(self, "debug_artifacts_dir", Path(self.debug_artifacts_dir))
 
         # Validate proxy URL format if provided
         if self.proxy is not None:

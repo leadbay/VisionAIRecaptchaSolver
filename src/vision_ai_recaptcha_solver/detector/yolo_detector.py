@@ -535,12 +535,12 @@ class YOLODetector:
 
         return results
 
-    def detect_objects(
+    def detect_objects_with_confidence(
         self,
         image: NDArray[np.uint8],
         target_class: int,
         conf_threshold: float | None = None,
-    ) -> list[tuple[int, int, int, int]]:
+    ) -> list[dict[str, float | int | tuple[int, int, int, int]]]:
         """Detect objects in the full image using the detection model.
 
         Args:
@@ -549,7 +549,7 @@ class YOLODetector:
             conf_threshold: Confidence threshold. If None, uses detection_conf_threshold.
 
         Returns:
-            List of bounding boxes as (x1, y1, x2, y2) tuples for detected targets.
+            List of detection dictionaries containing bbox/class/confidence.
         """
         threshold = conf_threshold or self.detection_conf_threshold
         results = self._detection_model.predict(image, conf=threshold, verbose=False)
@@ -561,16 +561,35 @@ class YOLODetector:
         if boxes_result is None or len(boxes_result) == 0:
             return []
 
-        bboxes: list[tuple[int, int, int, int]] = []
+        detections: list[dict[str, float | int | tuple[int, int, int, int]]] = []
 
         for i, cls in enumerate(boxes_result.cls):
             if int(cls.item()) == target_class:
                 xyxy = boxes_result.xyxy[i].cpu().numpy()
                 x1, y1, x2, y2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
-                bboxes.append((x1, y1, x2, y2))
-                self.logger.debug(f"Detected target at [{x1}, {y1}, {x2}, {y2}]")
+                conf = float(boxes_result.conf[i].item()) if boxes_result.conf is not None else 0.0
+                detections.append(
+                    {
+                        "bbox": (x1, y1, x2, y2),
+                        "class_id": int(cls.item()),
+                        "confidence": conf,
+                    }
+                )
+                self.logger.debug(
+                    f"Detected target at [{x1}, {y1}, {x2}, {y2}] conf={conf:.3f}"
+                )
 
-        return bboxes
+        return detections
+
+    def detect_objects(
+        self,
+        image: NDArray[np.uint8],
+        target_class: int,
+        conf_threshold: float | None = None,
+    ) -> list[tuple[int, int, int, int]]:
+        """Detect target object boxes in the full image."""
+        detections = self.detect_objects_with_confidence(image, target_class, conf_threshold)
+        return [d["bbox"] for d in detections if isinstance(d["bbox"], tuple)]
 
     def detect_for_grid(
         self,
