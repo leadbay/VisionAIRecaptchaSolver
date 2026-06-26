@@ -377,6 +377,7 @@ class AsyncRecaptchaSolver:
                     self.logger.info("Attempt %s target info: %s", attempts, attempt_info)
 
                     if target_class is None:
+                        attempt_info["action"] = "reload_unknown_target"
                         self.logger.info("Unknown target, reloading captcha")
                         await self._run_in_executor(click_reload_button, browser)
                         await self._run_in_executor(
@@ -393,6 +394,7 @@ class AsyncRecaptchaSolver:
                         continue
 
                     if captcha_type == CaptchaType.SQUARE_4X4 and coco_target_class is None:
+                        attempt_info["action"] = "reload_unsupported_4x4_target"
                         self.logger.info(
                             "Unsupported 4x4 target '%s' for COCO detection, reloading captcha",
                             keyword,
@@ -415,8 +417,10 @@ class AsyncRecaptchaSolver:
                     clicked_cells = await self._run_in_executor(
                         handler.solve, browser, target_class
                     )
+                    attempt_info["clicked_cells"] = clicked_cells
 
                     if not clicked_cells:
+                        attempt_info["action"] = "reload_no_cells_clicked"
                         self.logger.info("No cells clicked, reloading")
                         await self._run_in_executor(click_reload_button, browser)
                         await self._run_in_executor(
@@ -439,14 +443,21 @@ class AsyncRecaptchaSolver:
                     if await self._run_in_executor(
                         wait_for_verify_result, browser, self.config.default_timeout
                     ):
+                        attempt_info["action"] = "verify_solved"
                         solved_successfully = True
                         self.logger.info("Captcha solved successfully!")
                         break
+
+                    attempt_info["action"] = "verify_not_solved"
+                    self.logger.info("Attempt %s verify did not solve captcha", attempts)
 
                     # Not solved, continue to next attempt
                     await self._run_in_executor(human_delay, 0.2, 0.1)
 
                 except LowConfidenceError as e:
+                    if attempt_trace:
+                        attempt_trace[-1]["action"] = "reload_low_confidence"
+                        attempt_trace[-1]["error"] = str(e)
                     self.logger.info(f"Low confidence detection, reloading: {e}")
                     await self._run_in_executor(click_reload_button, browser)
                     await self._run_in_executor(
@@ -461,6 +472,9 @@ class AsyncRecaptchaSolver:
                     )
 
                 except (ElementNotFoundError, UnsupportedCaptchaError) as e:
+                    if attempt_trace:
+                        attempt_trace[-1]["action"] = "attempt_exception"
+                        attempt_trace[-1]["error"] = str(e)
                     self.logger.warning(f"Attempt {attempts} failed: {e}")
                     await self._run_in_executor(human_delay, 0.5, 0.1)
 
